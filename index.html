@@ -292,15 +292,25 @@
 
   /* ============ SUPABASE CONFIG ============
      Fill these in after creating your free project at https://supabase.com.
-     Both values are safe to expose client-side — real security comes from
-     Row Level Security policies on the table, not from hiding this key.
+     The key is the publishable one — newer projects show it as "Publishable key"
+     (sb_publishable_...), older ones as the "anon public" JWT. Either works here.
+     Never paste the secret / service_role key: real security comes from the Row
+     Level Security policies on the table, not from hiding this key.
      Leave as-is to run in local-only mode (no login, no cross-device sync). */
-  var SUPABASE_URL = "YOUR_SUPABASE_URL";
-  var SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
-  var sb = (window.supabase && SUPABASE_URL.indexOf("YOUR_") !== 0)
-    ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  var SUPABASE_URL = "https://ocwkqaeohozovjvykeoq.supabase.co";
+  var SUPABASE_ANON_KEY = "sb_publishable_Lw2fsiyTOCL_Eng7kr-o2w_NskQCTyC";
+  var sbConfigured = SUPABASE_URL.indexOf("YOUR_") !== 0 && SUPABASE_ANON_KEY.indexOf("YOUR_") !== 0;
+  var sb = (window.supabase && sbConfigured)
+    ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        auth: {
+          persistSession: true,      /* keeps you logged in across app launches */
+          autoRefreshToken: true,    /* renews the access token before it expires */
+          detectSessionInUrl: false  /* no OAuth redirect flow in this app */
+        }
+      })
     : null;
   var currentUser = null;
+  var cloudSyncPending = false; /* true when the last cloud write or read failed */
 
   /* ============ SOUND ============
      A soft two-tone chime (not a harsh beep) built with the Web Audio API — no audio
@@ -533,25 +543,54 @@
   async function saveState(){
     try{ if(window.localStorage) localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
     if(sb && currentUser){
+      /* supabase-js resolves rather than throws on API and network failures, so the
+         { error } field is the thing to check — a try/catch alone would never fire. */
       try{
-        await sb.from("progress").upsert({ user_id: currentUser.id, data: state, updated_at: new Date().toISOString() });
-      }catch(e){ /* offline or request failed — local copy is already saved, will sync on next successful save */ }
+        var res = await sb.from("progress").upsert(
+          { user_id: currentUser.id, data: state, updated_at: new Date().toISOString() },
+          { onConflict: "user_id" }
+        );
+        if(res.error){ cloudSyncPending = true; }
+        else { cloudSyncPending = false; }
+      }catch(e){ cloudSyncPending = true; }
+      /* offline or request failed — the local copy is already saved and the next
+         successful save pushes the whole state object, so nothing is lost. */
     }
   }
   async function loadStateFromCloud(){
+    var res;
     try{
-      var res = await sb.from("progress").select("data").eq("user_id", currentUser.id).maybeSingle();
-      if(res.data && res.data.data){
-        state = Object.assign(defaultState(), res.data.data);
-        if(!Array.isArray(state.cycleProgress) || typeof state.cycleProgress[0] !== "object"){ state.cycleProgress = emptyProgress(); }
-      } else {
-        state = defaultState();
-      }
-      try{ if(window.localStorage) localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
+      res = await sb.from("progress").select("data").eq("user_id", currentUser.id).maybeSingle();
     }catch(e){
       await loadState(); /* offline fallback to local cache */
+      return;
+    }
+    if(res.error){
+      /* RLS denial, missing table, or a dropped connection. Keep whatever is cached
+         locally rather than replacing real progress with an empty default. */
+      await loadState();
+      cloudSyncPending = true;
+      return;
+    }
+    if(res.data && res.data.data){
+      state = Object.assign(defaultState(), res.data.data);
+      if(!Array.isArray(state.cycleProgress) || typeof state.cycleProgress[0] !== "object"){ state.cycleProgress = emptyProgress(); }
+      try{ if(window.localStorage) localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
+      cloudSyncPending = false;
+    } else {
+      /* No row yet for this account — first login on a new account. Adopt whatever is
+         cached on this device so a local-only history carries over, then push it up.
+         saveState sets cloudSyncPending itself if that push fails. */
+      await loadState();
+      await saveState();
     }
   }
+
+  /* A save that failed while offline is retried as soon as the device is back, so a
+     workout finished on the subway still reaches the other devices. */
+  window.addEventListener("online", function(){
+    if(sb && currentUser && cloudSyncPending && state){ saveState(); }
+  });
 
   function bumpStreakForToday(today){
     if(state.lastCompletedDate === today){}
@@ -1246,10 +1285,42 @@
   async function init(){
     buildShell();
     if(sb){
+      /* React to sessions ending elsewhere — another tab, a revoked token, or a
+         refresh that failed while the app sat backgrounded on the Home Screen. */
+      sb.auth.onAuthStateChange(function(event, session){
+        if(event === "SIGNED_OUT" || (!session && event === "TOKEN_REFRESHED")){
+          if(currentUser){
+            currentUser = null;
+            authMode = "signin";
+            renderAuth();
+            showScreen("auth");
+          }
+        } else if(session && currentUser && session.user){
+          currentUser = session.user;
+        }
+      });
       try{
         var sess = await sb.auth.getSession();
         if(sess.data && sess.data.session){
+          /* getSession only reads local storage. Confirm the token is still good with
+             the server, otherwise a revoked or expired session lands on a home screen
+             where every save silently 401s. A network failure is not a rejection —
+             stay signed in and work from the local cache when offline. */
           currentUser = sess.data.session.user;
+          var verified = await sb.auth.getUser();
+          if(verified.error){
+            var status = verified.error.status;
+            if(status === 401 || status === 403){
+              currentUser = null;
+              try{ await sb.auth.signOut(); }catch(e2){}
+              renderAuth();
+              showScreen("auth");
+              return;
+            }
+            cloudSyncPending = true; /* offline — keep the cached session */
+          } else if(verified.data && verified.data.user){
+            currentUser = verified.data.user;
+          }
           await loadStateFromCloud();
           renderHome();
           showScreen("home");

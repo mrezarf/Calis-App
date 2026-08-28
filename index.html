@@ -636,6 +636,35 @@
     renderHome();
   }
 
+  /* ============ SCREEN WAKE LOCK ============
+     Keeps the display awake for the length of a workout — you are on the floor
+     mid-set, not tapping the screen, and the phone dimming out mid-timer is the
+     whole problem. Safari supports this from iOS 16.4; anywhere it is missing the
+     app simply behaves as before. iOS drops the lock whenever the page is hidden
+     (app switch, screen lock, incoming call), so it is re-acquired on return. */
+  var wakeLock = null;
+
+  async function requestWakeLock(){
+    if(!("wakeLock" in navigator)) return;
+    if(wakeLock) return;
+    try{
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", function(){ wakeLock = null; });
+    }catch(e){
+      /* Denied for reasons outside our control — low battery, or the tab lost
+         visibility before the request resolved. The workout continues either way. */
+      wakeLock = null;
+    }
+  }
+  function releaseWakeLock(){
+    if(!wakeLock) return;
+    try{ wakeLock.release(); }catch(e){}
+    wakeLock = null;
+  }
+  document.addEventListener("visibilitychange", function(){
+    if(document.visibilityState === "visible" && session){ requestWakeLock(); }
+  });
+
   /* ============ RUNTIME (workout session) ============ */
   var session = null;
 
@@ -675,6 +704,7 @@
     };
     showScreen("workout");
     startDrift();
+    requestWakeLock();
     goToPhase(0);
   }
 
@@ -745,7 +775,7 @@
         '</div>' +
       '</div>';
     document.body.appendChild(overlay);
-    document.getElementById("confirmStopBtn").onclick = function(){ overlay.remove(); stopDrift(); session = null; renderHome(); showScreen("home"); };
+    document.getElementById("confirmStopBtn").onclick = function(){ overlay.remove(); stopDrift(); releaseWakeLock(); session = null; renderHome(); showScreen("home"); };
     document.getElementById("cancelStopBtn").onclick = function(){
       overlay.remove();
       if(session){
@@ -781,6 +811,7 @@
     var isRedo = session.isRedo;
     var cycleJustFinished = completeDay(dayIndex, extraDone, fraction, isRedo);
     stopDrift();
+    releaseWakeLock();
     session = null;
     renderComplete(dayIndex, extraDone, cycleJustFinished, fraction);
     showScreen("complete");

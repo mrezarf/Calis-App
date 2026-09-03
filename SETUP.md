@@ -1,26 +1,95 @@
-# Cycle — Setup & Deployment Guide
+# Cycle — Operating Guide
 
-Everything needed to get the app live on GitHub Pages, wired to Supabase for login + cross-device sync, and installed on your iPhone. Written for a terminal workflow.
+A single-file calisthenics app: 15-minute sessions on a 4-day rotation, with
+login and cross-device sync through Supabase.
+
+| | |
+|---|---|
+| **Live** | https://mrezarf.github.io/Calis-App/ |
+| **Repo** | https://github.com/mrezarf/Calis-App (public) |
+| **App** | `index.html` — one self-contained file, ~2 MB, no build step |
+| **Backend** | Supabase project `ocwkqaeohozovjvykeoq` |
+
+Everything is already deployed and wired up. Section 1 is the day-to-day; the
+rest is reference for when something breaks or you rebuild from scratch.
 
 ---
 
-## 0. Prerequisites
+## 1. Updating the app
 
-- `git` installed (`git --version` to check)
-- A GitHub account (you have this)
-- A Supabase account (sign in with GitHub is fine)
-- The app file: `calisthenics-app.html`
+Edit `index.html`, then:
+
+```bash
+git add index.html
+git commit -m "Describe the change"
+git push
+```
+
+GitHub Pages rebuilds in 1–2 minutes. To confirm the new version is actually
+being served rather than a cached one:
+
+```bash
+curl -s "https://mrezarf.github.io/Calis-App/?cb=$RANDOM" | wc -c
+```
+
+Compare that byte count against your local `index.html`. If they match, the
+deploy landed.
+
+> The whole app — markup, styles, script, exercise GIFs and the app icon — lives
+> in that one file. GIFs and the icon are embedded as base64 data URIs, which is
+> why it is 2 MB. There is nothing to bundle or compile.
 
 ---
 
-## 1. Set up Supabase (login + data sync)
+## 2. What's in the current build
 
-### 1a. Create the project
-1. Go to https://supabase.com → dashboard → **New Project**.
-2. Name it anything, set a database password (save it, but you won't need it daily), pick a nearby region, create it. Wait ~2 min for provisioning.
+Worth knowing before you change things, because several of these are load-bearing.
 
-### 1b. Create the data table
-Open **SQL Editor** in the Supabase dashboard, paste this, and click **Run**:
+**Appearance.** Light and dark palettes with a toggle in the header (sun/moon).
+Dark is the default, and `data-theme="dark"` is set on `<html>` in the markup so
+the first paint is never the wrong appearance. The choice is stored per device
+under `clsx_theme`.
+
+**Colour.** The four day hues (`#F2555C` push, `#17D9AE` pull, `#4C86F0` legs,
+`#F5A928` core) are the identity colours. Text and button fills use *derived*
+variants — `--push-text`, `--push-fill`, `--push-on-fill` and so on — because the
+raw hues were drawn for a dark background and sit near 3:1 on white. Every
+pairing clears WCAG AA 4.5:1 in both appearances. **If you change a hue, change
+its derived variants too, or you will silently break contrast.**
+
+**Glass.** Cards and the dialog backdrop use `backdrop-filter`, each inside an
+`@supports` block with a solid fallback. Pills and chips get a gradient sheen
+instead — deliberately *not* `backdrop-filter`, because they sit inside cards
+that already have one, and nesting backdrop filters makes the blur smear on
+repaint. The gloss rules sit last in the stylesheet on purpose: the component
+rules use the `background` shorthand, which resets `background-image`.
+
+**Screen wake lock.** The display stays awake for the length of a workout.
+Requires a secure context, so it works on the live HTTPS site but is inert over
+plain `http://` on a LAN address. Feature-detected; needs iOS 16.4+.
+
+**Offline.** With no network the app runs from its local cache. A save that fails
+is retried automatically when the connection returns.
+
+---
+
+## 3. Data and sync
+
+Progress is stored in two places:
+
+- **`localStorage`** under `clsx_state_v2` — per device, works offline.
+- **Supabase** table `progress` — one row per account, keyed by `user_id`.
+
+On launch the app reads the cloud row and caches it locally. **It writes nothing
+on startup**, so opening a new build can never overwrite what is stored. If the
+cloud read fails, it falls back to the local cache rather than resetting.
+
+Changing `STORAGE_KEY`, the shape of `defaultState()`, or the table and column
+names will orphan existing progress. Don't, unless you intend to migrate it.
+
+### The table
+
+Already created. This is the definition, for reference or rebuilding:
 
 ```sql
 create table public.progress (
@@ -39,134 +108,108 @@ create policy "update own" on public.progress
   using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
 ```
 
-This creates the table the app saves to and locks it down with Row Level Security so each account can only read/write its own row. **This is what keeps your data private even though the site URL is public.**
+Three details that older guides get wrong:
 
-Three details that matter and that older guides get wrong:
-- `to authenticated` stops the policies from being evaluated for anonymous visitors at all.
-- Wrapping the call as `(select auth.uid())` lets Postgres evaluate it once per query instead of once per row — Supabase's own RLS performance recommendation.
-- The `update` policy needs **both** `using` and `with check`; with only `using`, an update can rewrite the row to a different `user_id`.
+- `to authenticated` stops the policies being evaluated for anonymous visitors.
+- `(select auth.uid())` is evaluated once per query instead of once per row —
+  Supabase's own RLS performance recommendation.
+- The update policy needs **both** `using` and `with check`. With only `using`,
+  an update could rewrite the row to a different `user_id`.
 
-### 1c. Enable email login
-- **Authentication → Providers → Email** → ensure Email is enabled.
-- For personal use, toggle **OFF** "Confirm email" so you can register and log in instantly (no confirmation-link step). Leave it on if you prefer the extra verification.
+Row Level Security is what keeps your data private even though the site is
+public. It is not the repo visibility doing that work.
 
-### 1d. (Optional) Lock it to just you
-After you register your own account (later, once deployed), come back to **Authentication → Providers → Email** and turn **OFF** "Allow new users to sign up." This seals the app so no one else can ever register — even though the login page is reachable.
+### Credentials
 
-### 1e. Copy your credentials
-You need **two** values — the key alone is not enough, since it doesn't say which project to talk to. In the current dashboard they live on separate pages:
-
-- **Project Settings → Data API** → copy the **Project URL** (`https://<project-ref>.supabase.co`).
-- **Project Settings → API Keys** → copy the **publishable** key.
-  - New projects show this as **Publishable key**, starting `sb_publishable_...`.
-  - Older projects show it as the **anon public** key, a long JWT starting `eyJ...`.
-  - Either format works — the app passes whatever you give it straight to the client.
-
-> Can't find them? The **Connect** button at the top of the project dashboard shows both on one panel. The URL is also derivable from your browser's address bar: in `supabase.com/dashboard/project/<project-ref>`, that last segment is your project ref, so the URL is `https://<project-ref>.supabase.co`.
-- ⚠️ Do NOT use the **secret** key (`sb_secret_...`) or the legacy `service_role` JWT. Those bypass Row Level Security and must never appear in client code. The publishable key is safe to embed — security comes from the RLS policies above, not from hiding the key.
-
-### 1f. Paste credentials into the app
-Open `calisthenics-app.html`. Near the top of the `<script>` tag you'll find:
+Both values are already in `index.html` near the top of the `<script>` tag:
 
 ```js
-var SUPABASE_URL = "YOUR_SUPABASE_URL";
-var SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
+var SUPABASE_URL = "https://ocwkqaeohozovjvykeoq.supabase.co";
+var SUPABASE_ANON_KEY = "sb_publishable_...";
 ```
 
-Replace both placeholders with your real values and save.
+The publishable key is **designed to be public** — that is why it can sit in a
+public repo. Security comes from the RLS policies above.
 
-> Note: until real credentials are in place, the app runs in local-only mode (no login screen, data saved only on that device). The mysterious login page only activates once Supabase is wired up.
+- **Project URL** → Supabase → Settings → **Data API**
+- **Publishable key** → Supabase → Settings → **API Keys**
+  (older projects show this as the `anon` JWT starting `eyJ...`; either works)
+- ⚠️ Never use the **secret** / `service_role` key in client code. It bypasses RLS.
 
----
+### Signups are closed
 
-## 2. Prepare the file for GitHub Pages
-
-GitHub Pages serves `index.html` as the default page, so rename the app file:
-
-```bash
-# from the folder containing the file
-mv calisthenics-app.html index.html
-```
-
----
-
-## 3. Push to GitHub (terminal)
-
-### Option A — repo doesn't exist yet, using GitHub CLI (`gh`)
-If you have the GitHub CLI installed and authenticated (`gh auth login`):
+New account creation is **disabled** (`disable_signup: true`). Your account works
+normally and you can log in on any device; nobody else can register. To reopen
+it: Supabase → Authentication → Sign In / Providers → *Allow new users to sign
+up*. Verify the actual state rather than trusting the dashboard:
 
 ```bash
-mkdir cycle-app && cd cycle-app
-mv ../index.html .          # move the renamed file in
-git init
-git add index.html
-git commit -m "Initial commit"
-gh repo create cycle-app --private --source=. --push
-```
-
-### Option B — repo doesn't exist yet, plain git
-1. Create an empty repo on github.com (the **+** menu → New repository → name it `cycle-app`, Private is fine, **don't** add a README). Copy its URL.
-2. Then:
-
-```bash
-mkdir cycle-app && cd cycle-app
-mv ../index.html .
-git init
-git add index.html
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/cycle-app.git
-git push -u origin main
-```
-
-### Updating later (after any edit)
-```bash
-git add index.html
-git commit -m "Update app"
-git push
+curl -s "https://ocwkqaeohozovjvykeoq.supabase.co/auth/v1/settings" \
+  -H "apikey: <publishable-key>" | grep -o '"disable_signup":[a-z]*'
 ```
 
 ---
 
-## 4. Turn on GitHub Pages
+## 4. Install on iPhone
 
-1. In the repo on github.com: **Settings → Pages**.
-2. Under **Build and deployment**: Source = **Deploy from a branch**, Branch = **main**, folder = **/ (root)**. Save.
-3. Wait 1–2 minutes. The Pages screen will show your live URL, e.g.:
-   ```
-   https://YOUR_USERNAME.github.io/cycle-app/
-   ```
-
-> Note: On free GitHub accounts, GitHub Pages serves the built site **publicly** even if the repo is Private. That's fine here — your data is protected by the Supabase login, not by the repo visibility. If you need the *site itself* hidden (not just the data), use a host with password protection (Netlify/Vercel paid tiers) instead of GitHub Pages.
-
----
-
-## 5. Install on iPhone
-
-1. Open the live URL in **Safari** (must be Safari — other iOS browsers can't install web apps to the Home Screen).
-2. Tap **Share** → **Add to Home Screen** → **Add**.
+1. Open https://mrezarf.github.io/Calis-App/ in **Safari** (only Safari can
+   install web apps to the Home Screen on iOS).
+2. **Share → Add to Home Screen → Add.**
 3. Launch it from the Home Screen — it opens full-screen with its own icon.
-4. Register / log in. Your data now syncs to Supabase and survives cache clears and works across every device you log into.
+
+> **Changing the icon later?** iOS caches it per installed web app. Delete the
+> existing tile and re-add it, or you will keep seeing the old icon no matter how
+> many times you reload.
 
 ---
 
-## 6. Quick reference — file/credential checklist
+## 5. Troubleshooting
 
-| Item | Where it comes from | Goes where |
-|------|---------------------|------------|
-| Project URL | Supabase → Settings → **Data API** | `SUPABASE_URL` in the HTML |
-| Publishable (or legacy anon) key | Supabase → Settings → **API Keys** | `SUPABASE_ANON_KEY` in the HTML |
-| Secret / service_role key | (do not use) | ❌ never in client code |
-| `progress` table | SQL Editor block above | Supabase database |
+- **Login page doesn't appear / goes straight into the app** → one or both
+  credentials still read `YOUR_...`. The login screen only activates once *both*
+  the URL and the key are filled in.
+- **"Invalid login credentials"** → wrong password, or the account doesn't exist.
+  Signups are closed, so a new account can't be created without reopening them.
+- **Data not syncing across devices** → confirm you're on the same account on
+  both. A save that failed offline retries automatically on reconnect.
+- **Logged in but nothing loads from the cloud** → usually a missing RLS policy.
+  Check all three exist under Table Editor → `progress` → RLS. The app falls back
+  to the on-device copy rather than showing an empty history.
+- **Page 404s** → the file must be named exactly `index.html` at the repo root.
+- **Screen dims during a workout** → needs iOS 16.4+ *and* HTTPS. It won't work
+  over a plain-HTTP LAN address. iOS also drops the lock when you switch apps;
+  it's re-acquired on return.
+- **Sounds don't play until you tap** → browsers require a user gesture before
+  audio. Tapping Start satisfies it.
+- **Favicon looks stale on desktop** → browsers cache favicons separately from
+  the page, so a hard reload won't refresh one. Load the URL with a query string
+  (`?v=2`) to force it.
 
 ---
 
-## 7. Troubleshooting
+## 6. Rebuilding from scratch
 
-- **Login page doesn't appear / goes straight into the app** → one or both credentials still say `YOUR_...`; paste real ones and re-push. The app only shows the login screen once *both* the URL and the key are filled in.
-- **"Invalid login credentials"** → account not created yet (use Request access), or email confirmation is still on and unconfirmed.
-- **Data not syncing across devices** → confirm the SQL from 1b ran without errors and you're logged into the same account on both devices. If a save fails while offline the app keeps the local copy and retries the push automatically when the connection returns.
-- **Logged in but nothing loads from the cloud** → usually a missing RLS policy. Open **Table Editor → progress → RLS** and check all three policies from 1b exist; the app deliberately falls back to the on-device copy rather than showing an empty history.
-- **Page 404s after enabling Pages** → the file must be named exactly `index.html` at the repo root; wait a couple minutes after enabling Pages.
-- **Screen still dims during a workout** → the app holds a screen wake lock for the length of a session, which needs iOS 16.4 or newer. On older iOS the lock is unavailable and the display follows your normal Auto-Lock setting. iOS also releases the lock whenever you switch apps or lock the phone; it is re-acquired automatically when you come back to the workout.
-- **Sounds don't play in preview but work when installed** → browsers require a user tap before audio; the installed app satisfies this on Start.
+Only needed if you start a new Supabase project or a new repo.
+
+1. **Supabase** → new project → SQL Editor → run the `create table` block in
+   section 3 → Authentication → Providers → enable Email and turn **off**
+   "Confirm email" for instant login.
+2. Copy the Project URL and publishable key into `index.html` (section 3).
+3. **GitHub** → create a repo, then:
+   ```bash
+   git init && git add index.html && git commit -m "Initial commit"
+   git branch -M main
+   git remote add origin https://github.com/<user>/<repo>.git
+   git push -u origin main
+   ```
+4. **Settings → Pages** → Source: *Deploy from a branch*, Branch: `main`,
+   folder: `/ (root)`.
+5. Register your account on the live site, then turn **off** "Allow new users to
+   sign up" to seal it.
+
+> **The repo must be public.** On GitHub Free, Pages only publishes from public
+> repositories — you cannot serve a site from a private repo without a paid plan.
+> That's fine here: the source is visible, but your workout data is protected by
+> the Supabase login and RLS, not by repo visibility. If you need the source
+> private, deploy from a private repo via Cloudflare Pages or Netlify instead
+> (both free), or upgrade to GitHub Pro.

@@ -1,13 +1,13 @@
 # Cycle — Operating Guide
 
-A single-file calisthenics app: 15-minute sessions on a 4-day rotation, with
+A single-file calisthenics app with Foundation and Build sessions on a 4-day rotation, with
 login and cross-device sync through Supabase.
 
 | | |
 |---|---|
 | **Live** | https://mrezarf.github.io/Calis-App/ |
 | **Repo** | https://github.com/mrezarf/Calis-App (public) |
-| **App** | `index.html` — one self-contained file, ~2 MB, no build step |
+| **App** | `index.html` — one self-contained file, ~3 MB, no build step |
 | **Backend** | Supabase project `ocwkqaeohozovjvykeoq` |
 
 Everything is already deployed and wired up. Section 1 is the day-to-day; the
@@ -37,7 +37,7 @@ deploy landed.
 
 > The whole app — markup, styles, script, exercise GIFs and the app icon — lives
 > in that one file. GIFs and the icon are embedded as base64 data URIs, which is
-> why it is 2 MB. There is nothing to bundle or compile.
+> why it is about 3 MB. There is nothing to bundle or compile.
 
 ---
 
@@ -45,12 +45,41 @@ deploy landed.
 
 Worth knowing before you change things, because several of these are load-bearing.
 
+**History and levels.** Tap the month progress pill to open the monthly archive.
+Four months appear at a time, with previous/next navigation, session totals,
+monthly percentages and workout-type rings. Months start collapsed; expand one
+for its daily calendar. History starts at the earliest recorded month and is not
+pruned (subject to browser storage capacity). The old 14-day strip is removed.
+Calendar L1/L2 markers retain the level of each saved workout; older records
+without a level are interpreted as Foundation without rewriting them.
+
+Foundation retains the original 12:45 session plus optional 2:15 bonus (15:00).
+Build uses harder variations: 20:25 plus optional 3:40 bonus (24:05). Choose
+Foundation or Build on the home screen. The choice is stored locally in
+`clsx_level`; a running session keeps the level it started with. Repeating a day
+at another level retains the more complete record; equal completion favors the
+higher level. Historical dates and statistics are retained.
+
+**Workout screen.** A centered countdown uses a continuous glossy bar shrinking
+toward its center, with fractional timing preserved on pause. Round indicators
+sit above exercise indicators. Square demonstrations use 70% of available width,
+adapting to compact portrait screens. All moves have short form instructions;
+rest phases label the animation as the next move. Playback controls use SVGs.
+Push is violet; Pull is teal, Legs blue, and Core amber.
+
+**Demonstrations.** Embedded GIFs continue to come from
+[mohamedatef90/exercise-library](https://github.com/mohamedatef90/exercise-library).
+New demos cover close-grip push-ups, single-leg bridges, single-leg calf raises,
+cross-body mountain climbers, suspension rows and bicycle crunches. Tempo
+variants carry a caption when the demo shows only the base movement. Moves
+without a verified source animation retain written instructions.
+
 **Appearance.** Light and dark palettes with a toggle in the header (sun/moon).
 Dark is the default, and `data-theme="dark"` is set on `<html>` in the markup so
 the first paint is never the wrong appearance. The choice is stored per device
 under `clsx_theme`.
 
-**Colour.** The four day hues (`#F2555C` push, `#17D9AE` pull, `#4C86F0` legs,
+**Colour.** The four day hues (`#B18CFF` push, `#17D9AE` pull, `#4C86F0` legs,
 `#F5A928` core) are the identity colours. Text and button fills use *derived*
 variants — `--push-text`, `--push-fill`, `--push-on-fill` and so on — because the
 raw hues were drawn for a dark background and sit near 3:1 on white. Every
@@ -80,9 +109,12 @@ Progress is stored in two places:
 - **`localStorage`** under `clsx_state_v2` — per device, works offline.
 - **Supabase** table `progress` — one row per account, keyed by `user_id`.
 
-On launch the app reads the cloud row and caches it locally. **It writes nothing
-on startup**, so opening a new build can never overwrite what is stored. If the
-cloud read fails, it falls back to the local cache rather than resetting.
+On launch the app reads an existing cloud row and caches it locally; it does not
+upsert that existing row. If the cloud read fails, it falls back to the local
+cache. An account without a cloud row adopts its local state and creates a row.
+The cloud remains authoritative on successful login: unsynced local changes from
+an earlier offline browser session may be replaced by cloud data. This is the
+existing sync behavior, not a migration introduced by the interface release.
 
 Changing `STORAGE_KEY`, the shape of `defaultState()`, or the table and column
 names will orphan existing progress. Don't, unless you intend to migrate it.
@@ -213,3 +245,24 @@ Only needed if you start a new Supabase project or a new repo.
 > the Supabase login and RLS, not by repo visibility. If you need the source
 > private, deploy from a private repo via Cloudflare Pages or Netlify instead
 > (both free), or upgrade to GitHub Pro.
+
+
+## 7. Release verification (2026-10-14)
+
+The release keeps `clsx_state_v2`, `clsx_theme`, Supabase project/table/columns,
+and the original state fields. Optional per-record `level` is additive. No SQL
+migration, history deletion, account reset or live-data rewrite is performed.
+Test fixture seeding, reset controls, review storage keys, review links and
+experimental timer options are excluded from the production file. The published
+timer is the center-collapse style. Local staging and orchestration files are
+ignored by Git and remain available for future review.
+
+See `CHANGELOG.md` for the release summary. Regression tests under `tests/` use
+synthetic records and mocked Supabase responses; they never access real accounts.
+Run `node tests/production-data.cjs` for data compatibility checks. Browser tests
+require Playwright and Chromium; see the configuration at the top of
+`tests/production-browser.cjs` for local paths/environment overrides.
+
+Rollback: revert the release commit and push `main`. Do not clear browser storage
+or alter the `progress` table. The preceding app can read records containing the
+additional `level` field.

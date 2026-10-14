@@ -1,1 +1,6 @@
 .DS_Store
+
+# Local review artifacts; never publish sample-data builds.
+staging/
+orchestration/
+index.revamp.html
